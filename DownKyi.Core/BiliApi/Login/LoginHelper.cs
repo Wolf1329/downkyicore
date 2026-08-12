@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Web;
 using DownKyi.Core.Logging;
 using DownKyi.Core.Settings;
 using DownKyi.Core.Settings.Models;
@@ -36,13 +36,24 @@ public static class LoginHelper
     }
 
     /// <summary>
+    /// 创建cookies的独立副本，避免调用方修改缓存内容
+    /// </summary>
+    /// <param name="cookies"></param>
+    /// <returns></returns>
+    private static List<DownKyiCookie> CloneCookies(IEnumerable<DownKyiCookie> cookies)
+    {
+        return cookies.Select(cookie => new DownKyiCookie(cookie.Name, cookie.Value, cookie.Domain)).ToList();
+    }
+
+    /// <summary>
     /// 保存登录的cookies到文件
     /// </summary>
     /// <param name="url"></param>
     /// <returns></returns>
     public static bool SaveLoginInfoCookies(string url)
     {
-        var cookies = GetLoginCookiesFromCallback(url);
+        var cookies = ObjectHelper.ParseCookie(url);
+
         return SaveLoginInfoCookies(cookies);
     }
 
@@ -92,7 +103,7 @@ public static class LoginHelper
     }
 
     /// <summary>
-    /// 获得登录的cookies，结果会被缓存到内存中，直到下次写操作使缓存失效
+    /// 获得登录的cookies，缓存内容会以独立快照返回，直到下次写操作使缓存失效
     /// </summary>
     /// <returns></returns>
     public static List<DownKyiCookie> GetLoginInfoCookies()
@@ -103,7 +114,7 @@ public static class LoginHelper
         {
             if (_cachedCookies != null)
             {
-                return _cachedCookies;
+                return CloneCookies(_cachedCookies);
             }
         }
         finally
@@ -118,7 +129,7 @@ public static class LoginHelper
             // 双重检查：可能其他线程已完成加载
             if (_cachedCookies != null)
             {
-                return _cachedCookies;
+                return CloneCookies(_cachedCookies);
             }
 
             if (!File.Exists(LocalLoginInfo))
@@ -131,7 +142,11 @@ public static class LoginHelper
             {
                 // 直接读取文件，用 FileShare.Read 避免独占锁，无需临时文件
                 using var stream = new FileStream(LocalLoginInfo, FileMode.Open, FileAccess.Read, FileShare.Read);
-                cookies = ObjectHelper.ReadCookiesFromStream(stream);
+                cookies = ObjectHelper.ReadCookiesFromStream(stream)?.Select(cookie =>
+                {
+                    cookie.Value = HttpUtility.UrlEncode(cookie.Value);
+                    return cookie;
+                }).ToList();
             }
             catch (Exception e)
             {
@@ -146,7 +161,7 @@ public static class LoginHelper
                 ? string.Join("; ", _cachedCookies.Select(item => $"{item.Name}={item.Value}"))
                 : "";
 
-            return _cachedCookies;
+            return CloneCookies(_cachedCookies);
         }
         finally
         {
@@ -217,100 +232,5 @@ public static class LoginHelper
             LogManager.Error(e);
             return false;
         }
-    }
-
-    /// <summary>
-    /// 访问扫码登录成功回调，提取完整的会话cookies。
-    /// </summary>
-    /// <param name="url"></param>
-    /// <returns></returns>
-    private static List<DownKyiCookie> GetLoginCookiesFromCallback(string url)
-    {
-        var cookies = ObjectHelper.ParseCookie(url);
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var callbackUri))
-        {
-            return cookies;
-        }
-
-        try
-        {
-            var cookieContainer = new CookieContainer();
-            using var handler = new HttpClientHandler
-            {
-                AllowAutoRedirect = true,
-                AutomaticDecompression = DecompressionMethods.All,
-                CookieContainer = cookieContainer,
-                UseCookies = true
-            };
-            using var httpClient = new HttpClient(handler);
-            httpClient.DefaultRequestHeaders.Add("User-Agent", SettingsManager.GetInstance().GetUserAgent());
-            httpClient.DefaultRequestHeaders.Add("accept-language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7");
-
-            using var response = httpClient.GetAsync(callbackUri).GetAwaiter().GetResult();
-            response.EnsureSuccessStatusCode();
-
-            var merged = MergeCookies(cookies, ExtractCookies(cookieContainer));
-            if (merged.Count > 0)
-            {
-                return merged;
-            }
-        }
-        catch (Exception e)
-        {
-            Console.PrintLine("GetLoginCookiesFromCallback()发生异常: {0}", e);
-            LogManager.Error(e);
-        }
-
-        return cookies;
-    }
-
-    private static List<DownKyiCookie> ExtractCookies(CookieContainer cookieContainer)
-    {
-        var result = new List<DownKyiCookie>();
-        var uris = new[]
-        {
-            new Uri("https://www.bilibili.com"),
-            new Uri("https://passport.bilibili.com"),
-            new Uri("https://api.bilibili.com"),
-            new Uri("https://account.bilibili.com")
-        };
-
-        foreach (var uri in uris)
-        {
-            foreach (Cookie cookie in cookieContainer.GetCookies(uri))
-            {
-                if (string.IsNullOrEmpty(cookie.Name) || string.IsNullOrEmpty(cookie.Value))
-                {
-                    continue;
-                }
-
-                result.Add(new DownKyiCookie(
-                    cookie.Name,
-                    cookie.Value,
-                    string.IsNullOrWhiteSpace(cookie.Domain) ? ".bilibili.com" : cookie.Domain));
-            }
-        }
-
-        return result;
-    }
-
-    private static List<DownKyiCookie> MergeCookies(IEnumerable<DownKyiCookie> primary, IEnumerable<DownKyiCookie> secondary)
-    {
-        var merged = new Dictionary<string, DownKyiCookie>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var cookie in primary.Concat(secondary))
-        {
-            if (string.IsNullOrEmpty(cookie.Name) || string.IsNullOrEmpty(cookie.Value))
-            {
-                continue;
-            }
-
-            merged[cookie.Name] = new DownKyiCookie(
-                cookie.Name,
-                cookie.Value,
-                string.IsNullOrWhiteSpace(cookie.Domain) ? ".bilibili.com" : cookie.Domain);
-        }
-
-        return merged.Values.ToList();
     }
 }
